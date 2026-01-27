@@ -159,9 +159,8 @@ void main() {
   // --- Continuous outward wave from inner cutout ---
   // distFromCenter: 0 at image center (inner cutout), 1 at image edge (outer petals)
   float distFromCenter = 1.0 - radialFromCenter;
-  // Blend wave coordinate with Poisson for petal contouring of the wavefront
-  // 0.4 factor so wavefront visibly curves around petals
-  float waveCoord = mix(distFromCenter, distFromCenter + (1.0 - poissonDist) * 0.4, u_petalEmphasis);
+  // Pure radial coordinate — wave always starts from inner edge, travels outward
+  float waveCoord = distFromCenter;
 
   // Two staggered wavefronts continuously traveling outward
   float cycle = t * 0.3;
@@ -189,8 +188,13 @@ void main() {
   float wave2 = max(trail2, lead2);
   float wave = max(wave1, wave2);
 
+  // Amplitude-based petal shaping: petals (high poissonDist) get stronger wave effect
+  // At petalEmphasis=0: uniform wave amplitude everywhere
+  // At petalEmphasis=1: wave is stronger in deep petal interiors, weaker at thin edges
+  float petalAmp = mix(1.0, 0.5 + 0.5 * poissonDist, u_petalEmphasis);
+
   // Wave modulates shape — creates visible traveling color gradient
-  shape = shape * (0.3 + 0.7 * wave);
+  shape = shape * (0.3 + 0.7 * wave * petalAmp);
 
   // --- Organic noise distortion ---
   float noise = snoise(imgUV * 6. + t * .3);
