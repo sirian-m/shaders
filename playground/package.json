@@ -1,0 +1,27 @@
+{
+  "name": "playground",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@paper-design/shaders": "workspace:*",
+    "@paper-design/shaders-react": "workspace:*",
+    "next": "15.3.6",
+    "react": "19.2.2",
+    "react-dom": "19.2.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.1.12",
+    "@types/node": "22.10.2",
+    "@types/react": "19.1.0",
+    "@types/react-dom": "19.1.1",
+    "postcss": "8.4.49",
+    "tailwindcss": "4.1.12",
+    "typescript": "5.7.2"
+  }
+}
