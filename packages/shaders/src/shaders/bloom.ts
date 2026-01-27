@@ -14,7 +14,7 @@ export const bloomMeta = {
  *
  * Fragment shader uniforms:
  * - u_time (float): Animation time
- * - u_image (sampler2D): Pre-processed source image texture (R = poisson distance, G = alpha, B = blur)
+ * - u_image (sampler2D): Pre-processed source image texture (R = poisson distance, G = scale ratio for wave shape, B = blur)
  * - u_imageAspectRatio (float): Aspect ratio of the source image
  * - u_colorBack (vec4): Background color in RGBA
  * - u_colors (vec4[]): Up to 10 bloom colors in RGBA
@@ -70,6 +70,7 @@ uniform float u_softness;
 uniform float u_innerGlow;
 uniform float u_outerGlow;
 uniform float u_petalEmphasis;
+uniform float u_waveCurvature;
 
 ${ declarePI }
 ${ simplexNoise }
@@ -122,12 +123,12 @@ void main() {
 
   // --- Extract texture channels ---
   float poissonDist = img.r;
-  float shapeAlpha = img.g;
+  float scaleRatio = img.g; // Pre-computed: 0 at center, 1 at outer boundary (petal-shaped contours)
   float blurData = img.b;
   blurData = blurEdge3x3(u_image, imgUV, dudx, dudy, 8., blurData);
 
-  // Shape mask: 1 inside the shape, 0 outside (including center hole)
-  float isShape = smoothstep(0.0, 0.05, shapeAlpha);
+  // Shape mask: derived from Poisson field (0 outside shape, 1 inside)
+  float isShape = smoothstep(0.0, 0.03, poissonDist);
 
   // Early exit for pixels far from shape
   if (isShape < 0.01 && blurData < 0.01) {
@@ -159,8 +160,9 @@ void main() {
   // --- Continuous outward wave from inner cutout ---
   // distFromCenter: 0 at image center (inner cutout), 1 at image edge (outer petals)
   float distFromCenter = 1.0 - radialFromCenter;
-  // Pure radial coordinate — wave always starts from inner edge, travels outward
-  float waveCoord = distFromCenter;
+  // waveCurvature: 0 = circular wavefronts (radial), 1 = petal-shaped wavefronts
+  // scaleRatio has iso-contours that are scaled versions of the outer boundary shape
+  float waveCoord = mix(distFromCenter, scaleRatio, u_waveCurvature);
 
   // Two staggered wavefronts continuously traveling outward
   float cycle = t * 0.3;
@@ -188,13 +190,8 @@ void main() {
   float wave2 = max(trail2, lead2);
   float wave = max(wave1, wave2);
 
-  // Amplitude-based petal shaping: petals (high poissonDist) get stronger wave effect
-  // At petalEmphasis=0: uniform wave amplitude everywhere
-  // At petalEmphasis=1: wave is stronger in deep petal interiors, weaker at thin edges
-  float petalAmp = mix(1.0, 0.5 + 0.5 * poissonDist, u_petalEmphasis);
-
   // Wave modulates shape — creates visible traveling color gradient
-  shape = shape * (0.3 + 0.7 * wave * petalAmp);
+  shape = shape * (0.3 + 0.7 * wave);
 
   // --- Organic noise distortion ---
   float noise = snoise(imgUV * 6. + t * .3);
@@ -441,6 +438,36 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
         if (u[idx]! > maxVal) maxVal = u[idx]!;
       }
 
+      // --- Compute outer boundary distance per angle for petal-shaped wave coordinate ---
+      const NUM_ANGLES = 360;
+      const cx = poissonWidth / 2;
+      const cy = poissonHeight / 2;
+      const rOuterRaw = new Float32Array(NUM_ANGLES);
+
+      for (let y = 0; y < poissonHeight; y++) {
+        for (let x = 0; x < poissonWidth; x++) {
+          if (!shapeMask[y * poissonWidth + x]) continue;
+          const dx = x - cx;
+          const dy = y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const angleDeg = ((Math.atan2(dy, dx) * 180 / Math.PI) + 360) % 360;
+          const bin = Math.floor(angleDeg) % NUM_ANGLES;
+          if (dist > rOuterRaw[bin]!) rOuterRaw[bin] = dist;
+        }
+      }
+
+      // Smooth the outer boundary to fill gaps and reduce noise
+      const rOuterSmooth = new Float32Array(NUM_ANGLES);
+      const SMOOTH_HALF = 3;
+      for (let i = 0; i < NUM_ANGLES; i++) {
+        let sum = 0, count = 0;
+        for (let j = -SMOOTH_HALF; j <= SMOOTH_HALF; j++) {
+          const idx = ((i + j) % NUM_ANGLES + NUM_ANGLES) % NUM_ANGLES;
+          if (rOuterRaw[idx]! > 0) { sum += rOuterRaw[idx]!; count++; }
+        }
+        rOuterSmooth[i] = count > 0 ? sum / count : 1;
+      }
+
       // Create Poisson distance at working resolution
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = poissonWidth;
@@ -462,7 +489,19 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
             const poissonRatio = maxVal > 0 ? u[idx]! / maxVal : 0;
             const dist = Math.round(255 * poissonRatio);
             tempImg.data[px] = dist; // R: Poisson distance (0=edge, 255=deep interior)
-            tempImg.data[px + 1] = shapeData[idx * 4 + 3] ?? 0; // G: original alpha
+
+            // G: scale ratio (0=center, 1=outer boundary) — petal-shaped contours
+            const dx = x - cx;
+            const dy = y - cy;
+            const pixDist = Math.sqrt(dx * dx + dy * dy);
+            const angleDeg = ((Math.atan2(dy, dx) * 180 / Math.PI) + 360) % 360;
+            const binLow = Math.floor(angleDeg) % NUM_ANGLES;
+            const binHigh = (binLow + 1) % NUM_ANGLES;
+            const frac = angleDeg - Math.floor(angleDeg);
+            const rMax = rOuterSmooth[binLow]! * (1 - frac) + rOuterSmooth[binHigh]! * frac;
+            const scaleRatio = rMax > 0 ? Math.min(pixDist / rMax, 1.0) : 0;
+            tempImg.data[px + 1] = Math.round(255 * scaleRatio);
+
             tempImg.data[px + 2] = 0; // placeholder, blur added later
             tempImg.data[px + 3] = 255;
           }
@@ -488,14 +527,6 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
 
       const outputData = outputCtx.getImageData(0, 0, width, height);
 
-      // Re-read original at padded size for alpha
-      const alphaCanvas = document.createElement('canvas');
-      alphaCanvas.width = width;
-      alphaCanvas.height = height;
-      const alphaCtx = alphaCanvas.getContext('2d')!;
-      alphaCtx.drawImage(image, padding, padding, imgWidth, imgHeight);
-      const alphaData = alphaCtx.getImageData(0, 0, width, height);
-
       // --- Step 4: Combine channels ---
       const finalImageData = ctx.createImageData(width, height);
       const dst = finalImageData.data;
@@ -503,7 +534,7 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
       for (let i = 0; i < totalPixels; i++) {
         const px = i * 4;
         dst[px] = outputData.data[px] ?? 0;             // R: Poisson distance
-        dst[px + 1] = alphaData.data[px + 3] ?? 0;      // G: original alpha as opacity indicator
+        dst[px + 1] = outputData.data[px + 1] ?? 0;     // G: scale ratio (petal-shaped wave coordinate)
         dst[px + 2] = bigBlurGray[i] ?? 0;               // B: blur data for glow
         dst[px + 3] = 255;
       }
@@ -707,6 +738,7 @@ export interface BloomUniforms extends ShaderSizingUniforms {
   u_innerGlow: number;
   u_outerGlow: number;
   u_petalEmphasis: number;
+  u_waveCurvature: number;
 }
 
 export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
@@ -720,4 +752,5 @@ export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
   innerGlow?: number;
   outerGlow?: number;
   petalEmphasis?: number;
+  waveCurvature?: number;
 }

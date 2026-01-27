@@ -641,6 +641,7 @@ export const shaderRegistry: ShaderEntry[] = [
       { key: 'colors', label: 'Colors', type: 'colorArray', maxColors: 10 },
       { key: 'bloomSpread', label: 'Bloom Spread', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'petalEmphasis', label: 'Petal Emphasis', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'waveCurvature', label: 'Wave Curvature', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'contour', label: 'Contour', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'noise', label: 'Noise', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'softness', label: 'Softness', type: 'number', min: 0, max: 1, step: 0.01 },
