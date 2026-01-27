@@ -644,7 +644,7 @@ export const shaderRegistry: ShaderEntry[] = [
       { key: 'waveCurvature', label: 'Wave Curvature', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'contour', label: 'Contour', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'noise', label: 'Noise', type: 'number', min: 0, max: 1, step: 0.01 },
-      { key: 'softness', label: 'Softness', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'softness', label: 'Softness', type: 'number', min: 0, max: 3, step: 0.01 },
       { key: 'innerGlow', label: 'Inner Glow', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'outerGlow', label: 'Outer Glow', type: 'number', min: 0, max: 1, step: 0.01 },
       ...sizingParams,
