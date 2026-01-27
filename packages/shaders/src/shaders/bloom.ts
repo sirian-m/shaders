@@ -8,8 +8,8 @@ export const bloomMeta = {
 } as const;
 
 /**
- * A blooming radial animation combining multi-color gradient glow with metallic
- * surface effects, applied to an input image. The animation emanates from the
+ * A blooming radial animation combining multi-color gradient glow,
+ * applied to an input image. The animation emanates from the
  * center of the shape outward, following petal contours of the input image.
  *
  * Fragment shader uniforms:
@@ -20,7 +20,6 @@ export const bloomMeta = {
  * - u_colors (vec4[]): Up to 10 bloom colors in RGBA
  * - u_colorsCount (float): Number of active colors
  * - u_bloomSpread (float): Width of the bloom wavefront (0 to 1)
- * - u_metallic (float): Blend between color glow and metallic surface (0 to 1)
  * - u_contour (float): Edge emphasis strength (0 to 1)
  * - u_noise (float): Organic noise intensity (0 to 1)
  * - u_softness (float): Color transition sharpness (0 to 1)
@@ -65,7 +64,6 @@ uniform vec4 u_colors[${ bloomMeta.maxColorCount }];
 uniform float u_colorsCount;
 
 uniform float u_bloomSpread;
-uniform float u_metallic;
 uniform float u_contour;
 uniform float u_noise;
 uniform float u_softness;
@@ -106,13 +104,6 @@ float blurEdge3x3(sampler2D tex, vec2 uv, vec2 dudx, vec2 dudy, float radius, fl
   return sum / norm;
 }
 
-float bloomWave(float animCoord, float wavePos, float spread) {
-  // Create a smooth band centered at wavePos
-  float lower = smoothstep(wavePos - spread, wavePos - spread * .3, animCoord);
-  float upper = 1. - smoothstep(wavePos + spread * .3, wavePos + spread, animCoord);
-  return lower * upper;
-}
-
 void main() {
   vec2 uv = v_objectUV + .5;
   uv.y = 1. - uv.y;
@@ -127,135 +118,136 @@ void main() {
   vec2 dudx = dFdx(imgUV);
   vec2 dudy = dFdy(imgUV);
 
-  if (img.a == 0.) {
+  float t = .1 * u_time;
+
+  // --- Extract texture channels ---
+  float poissonDist = img.r;
+  float shapeAlpha = img.g;
+  float blurData = img.b;
+  blurData = blurEdge3x3(u_image, imgUV, dudx, dudy, 8., blurData);
+
+  // Shape mask: 1 inside the shape, 0 outside (including center hole)
+  float isShape = smoothstep(0.0, 0.05, shapeAlpha);
+
+  // Early exit for pixels far from shape
+  if (isShape < 0.01 && blurData < 0.01) {
     fragColor = u_colorBack;
     return;
   }
 
-  float t = .1 * u_time;
+  // --- Shape value from Poisson distance ---
+  // poissonDist: 0 at edges, 1 at deep interior
+  // Apply falloff curve controlled by bloomSpread
+  float falloff = mix(0.4, 2.5, u_bloomSpread);
+  float baseShape = pow(poissonDist, falloff);
 
-  // --- Distance fields ---
-  // R channel: Poisson distance (0 at edges, 1 at deepest interior)
-  float poissonDist = img.r;
+  // Radial distance: 1 at center, 0 at edge
+  float radialFromCenter = 1. - clamp(length(imgUV - vec2(.5)) * 2., 0., 1.);
+  float radialShape = pow(radialFromCenter, falloff);
 
-  // G channel: original alpha / opacity
-  float shapeAlpha = img.g;
+  // petalEmphasis: 0=uniform radial, 1=follows petal contours
+  float shape = mix(radialShape, baseShape, u_petalEmphasis);
 
-  // B channel: blur data for glow
-  float blurData = img.b;
-  blurData = blurEdge3x3(u_image, imgUV, dudx, dudy, 8., blurData);
+  // --- Subtle edge darkening (contour) ---
+  float edgeDark = smoothstep(0.0, mix(0.3, 0.02, u_contour), poissonDist);
+  shape *= mix(1.0, edgeDark, isShape);
 
-  // Euclidean radial distance from center (0 at center, 1 at edge)
-  float radial = length(imgUV - vec2(.5)) * 2.;
-  radial = clamp(radial, 0., 1.);
+  // --- Inner glow: brightens interior ---
+  float innerBrightness = poissonDist * mix(0.0, 0.3, u_innerGlow);
+  shape = clamp(shape + innerBrightness * isShape, 0.0, 1.0);
 
-  // Radial from center: 1 at center, 0 at edge
-  float radialFromCenter = 1. - radial;
+  // --- Continuous outward wave from inner cutout ---
+  // distFromCenter: 0 at image center (inner cutout), 1 at image edge (outer petals)
+  float distFromCenter = 1.0 - radialFromCenter;
+  // Blend wave coordinate with Poisson for petal contouring of the wavefront
+  // 0.4 factor so wavefront visibly curves around petals
+  float waveCoord = mix(distFromCenter, distFromCenter + (1.0 - poissonDist) * 0.4, u_petalEmphasis);
 
-  // Blend contour-following distance with radial distance
-  // petalEmphasis=0: uniform radial, petalEmphasis=1: follows petal contours
-  float animCoord = mix(radialFromCenter, poissonDist, u_petalEmphasis);
+  // Two staggered wavefronts continuously traveling outward
+  float cycle = t * 0.3;
+  float wavePos1 = fract(cycle);
+  float wavePos2 = fract(cycle + 0.5);
 
-  // --- Bloom wave animation ---
-  // 3 overlapping waves at 1/3 period offset for continuous animation
-  float spread = mix(.08, .5, u_bloomSpread);
+  // How long ago each wavefront passed this pixel (mod wraps around seamlessly)
+  float age1 = mod(wavePos1 - waveCoord, 1.0);
+  float age2 = mod(wavePos2 - waveCoord, 1.0);
 
-  float wave1Pos = fract(t);
-  float wave2Pos = fract(t + .333);
-  float wave3Pos = fract(t + .667);
+  // Trailing decay: exponential brightness falloff after wavefront passes
+  float decayRate = mix(6.0, 2.0, u_bloomSpread);
+  float trail1 = exp(-age1 * decayRate);
+  float trail2 = exp(-age2 * decayRate);
 
-  // Waves sweep from high animCoord (center/interior) to low (edges)
-  // Invert wave position so wave starts from center
-  float w1 = bloomWave(animCoord, 1. - wave1Pos, spread);
-  float w2 = bloomWave(animCoord, 1. - wave2Pos, spread);
-  float w3 = bloomWave(animCoord, 1. - wave3Pos, spread);
+  // Soft leading edge: gradual ramp-up ahead of the wavefront
+  float leadWidth = mix(0.05, 0.2, u_softness);
+  float ahead1 = 1.0 - age1;
+  float ahead2 = 1.0 - age2;
+  float lead1 = exp(-ahead1 * ahead1 / (2.0 * leadWidth * leadWidth));
+  float lead2 = exp(-ahead2 * ahead2 / (2.0 * leadWidth * leadWidth));
 
-  float waveIntensity = clamp(w1 + w2 + w3, 0., 1.);
+  // Each wave: trailing decay behind + soft leading glow ahead
+  float wave1 = max(trail1, lead1);
+  float wave2 = max(trail2, lead2);
+  float wave = max(wave1, wave2);
+
+  // Wave modulates shape — creates visible traveling color gradient
+  shape = shape * (0.3 + 0.7 * wave);
 
   // --- Organic noise distortion ---
   float noise = snoise(imgUV * 6. + t * .3);
-  waveIntensity += u_noise * .2 * noise * waveIntensity;
-  waveIntensity = clamp(waveIntensity, 0., 1.);
+  shape += u_noise * 0.1 * noise;
+  shape = clamp(shape, 0.0, 1.0);
 
-  // --- Glow effects ---
-  // Determine inside/outside shape
-  float isInside = 1. - smoothstep(.01, .05, poissonDist);
+  // Mask shape to actual shape region
+  shape *= isShape;
 
-  float outerBlur = 1. - mix(1., blurData, isInside);
+  // --- Outer glow (heatmap approach, kept as-is) ---
+  float outerBlur = 1.0 - mix(1.0, blurData, 1.0 - isShape);
   outerBlur *= imgSoftFrame;
-  float innerBlur = mix(blurData, 0., isInside);
+  float outerGlowBase = .9 * pow(max(outerBlur, 0.0), .8) * mix(0., 5., pow(u_outerGlow, 2.));
+  float glowPulse = .5 + .5 * sin(TWO_PI * t + outerBlur * 6.);
+  float outerGlowVal = outerGlowBase * (.4 + .6 * glowPulse);
 
-  float innerGlow = (1. - isInside) * innerBlur * mix(0., 2., u_innerGlow);
-  float outerGlow = isInside * outerBlur * mix(0., 5., pow(u_outerGlow, 2.));
-
-  // --- Edge contour ---
-  float edgeDist = poissonDist;
-  float edge = smoothstep(.0, .04, edgeDist) * (1. - smoothstep(.04, .12, edgeDist));
-  float contourBoost = u_contour * 2. * edge;
-
-  // --- Combine heat value ---
-  float heat = waveIntensity * (1. - isInside);
-  heat += innerGlow;
-  heat += outerGlow;
-  heat += contourBoost * (1. - isInside);
-  heat = clamp(heat, 0., 1.);
-
-  // --- Apply softness to heat distribution ---
-  heat = pow(heat, mix(1.5, .7, u_softness));
+  // Combine: shape fill inside + outer glow outside
+  float combinedShape = shape + outerGlowVal;
+  combinedShape = clamp(combinedShape, 0.0, 1.0);
 
   // Add grain noise
-  heat += (.005 + .35 * u_noise) * (fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453123) - .5);
-  heat = clamp(heat, 0., 1.);
+  combinedShape += (.005 + .35 * u_noise) * (fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453123) - .5);
+  combinedShape = clamp(combinedShape, 0.0, 1.0);
 
-  // --- Multi-color gradient mapping (identical to heatmap pattern) ---
-  float mixer = heat * u_colorsCount;
+  // --- Smooth multi-color gradient mapping (from static-radial-gradient) ---
+  float mixer = combinedShape * u_colorsCount;
   vec4 gradient = u_colors[0];
   gradient.rgb *= gradient.a;
   float outerShape = 0.;
+
   for (int i = 1; i < ${ bloomMeta.maxColorCount + 1 }; i++) {
     if (i > int(u_colorsCount)) break;
-    float m = clamp(mixer - float(i - 1), 0., 1.);
+
+    float mLinear = clamp(mixer - float(i - 1), 0.0, 1.0);
+    float aa = fwidth(mLinear);
+    float w = min(mix(0.1, 0.5, u_softness), 0.5);
+    float easeT = clamp((mLinear - (0.5 - w - aa)) / (2.0 * w + 2.0 * aa), 0.0, 1.0);
+    float p = mix(2.0, 1.0, clamp((mix(0.1, 0.5, u_softness) - 0.5) * 2.0, 0.0, 1.0));
+    float m = easeT < 0.5
+      ? 0.5 * pow(2.0 * easeT, p)
+      : 1.0 - 0.5 * pow(2.0 * (1.0 - easeT), p);
+
+    float quadBlend = clamp((mix(0.1, 0.5, u_softness) - 0.5) * 2.0, 0.0, 1.0);
+    m = mix(m, m * m, 0.5 * quadBlend);
+
     if (i == 1) {
       outerShape = m;
     }
+
     vec4 c = u_colors[i - 1];
     c.rgb *= c.a;
     gradient = mix(gradient, c, m);
   }
 
-  // --- Metallic layer ---
-  // Compute gradient direction from distance field for metallic reflections
-  float dDistDx = dFdx(poissonDist);
-  float dDistDy = dFdy(poissonDist);
-  float gradMag = length(vec2(dDistDx, dDistDy));
-
-  // Create reflective bands along isocontour lines
-  vec2 gradDir = normalize(vec2(dDistDx, dDistDy) + .001);
-  float stripe = dot(gradDir, imgUV * 8.) - t * .5;
-  stripe += u_noise * .5 * snoise(imgUV * 4. - t * .2);
-
-  float metallicBand = .5 + .45 * sin(stripe * TWO_PI);
-
-  // Bump from distance field
-  float bump = pow(clamp(poissonDist, 0., 1.), .8);
-  metallicBand = mix(metallicBand, .8 + .2 * metallicBand, .3 * bump);
-
-  // Add specular highlight
-  float specular = pow(max(0., sin(stripe * TWO_PI * 2.)), 8.) * .3;
-  metallicBand += specular;
-
-  metallicBand = clamp(metallicBand, 0., 1.);
-
-  // --- Blend glow and metallic ---
-  vec3 glowColor = gradient.rgb * outerShape;
-  float glowOpacity = gradient.a * outerShape;
-
-  // Metallic modulates the gradient colors
-  vec3 metalColor = glowColor * metallicBand;
-  float metalOpacity = glowOpacity;
-
-  vec3 color = mix(glowColor, metalColor, u_metallic);
-  float opacity = mix(glowOpacity, metalOpacity, u_metallic);
+  // --- Final color ---
+  vec3 color = gradient.rgb * outerShape;
+  float opacity = gradient.a * outerShape;
 
   // --- Composite over background ---
   vec3 bgColor = u_colorBack.rgb * u_colorBack.a;
@@ -705,7 +697,6 @@ export interface BloomUniforms extends ShaderSizingUniforms {
   u_colors: vec4[];
   u_colorsCount: number;
   u_bloomSpread: number;
-  u_metallic: number;
   u_contour: number;
   u_noise: number;
   u_softness: number;
@@ -719,7 +710,6 @@ export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
   colorBack?: string;
   colors?: string[];
   bloomSpread?: number;
-  metallic?: number;
   contour?: number;
   noise?: number;
   softness?: number;
