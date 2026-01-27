@@ -103,6 +103,10 @@ export { Heatmap, heatmapPresets } from './shaders/heatmap.js';
 export type { HeatmapProps } from './shaders/heatmap.js';
 export type { HeatmapUniforms, HeatmapParams } from '@paper-design/shaders';
 
+export { Bloom, bloomPresets } from './shaders/bloom.js';
+export type { BloomProps } from './shaders/bloom.js';
+export type { BloomUniforms, BloomParams } from '@paper-design/shaders';
+
 export { LiquidMetal, liquidMetalPresets } from './shaders/liquid-metal.js';
 export type { LiquidMetalProps } from './shaders/liquid-metal.js';
 export type { LiquidMetalUniforms, LiquidMetalParams } from '@paper-design/shaders';
@@ -119,6 +123,7 @@ export { isPaperShaderElement, getShaderColorFromString } from '@paper-design/sh
 export type { PaperShaderElement, ShaderFit, ShaderSizingParams, ShaderSizingUniforms } from '@paper-design/shaders';
 
 export {
+  bloomMeta,
   colorPanelsMeta,
   dotOrbitMeta,
   godRaysMeta,

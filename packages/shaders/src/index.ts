@@ -190,6 +190,15 @@ export {
   type HeatmapUniforms,
 } from './shaders/heatmap.js';
 
+/** A blooming radial animation combining multi-color gradient glow with metallic surface effects, applied to an input image */
+export {
+  bloomMeta,
+  bloomFragmentShader,
+  toProcessedBloom,
+  type BloomParams,
+  type BloomUniforms,
+} from './shaders/bloom.js';
+
 /** Futuristic liquid metal material applied to uploaded logo or one of pre-defined abstract shape */
 export {
   liquidMetalFragmentShader,
