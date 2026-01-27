@@ -113,28 +113,26 @@ float blurEdge3x3(sampler2D tex, vec2 uv, vec2 dudx, vec2 dudy, float radius, fl
   return sum / norm;
 }
 
-// Height profile for 3D highlight normals.
-// Uses two fields: Poisson (R) for rim, scaleRatio (G) for body dome.
-// Rim: raised ridge near the edge — outer slope faces outward (catches highlights),
-//   inner slope faces inward (convex-to-concave S-curve transition).
-// Body: power-curve dome from scaleRatio, which follows petal contours
-//   and has gradients everywhere in the interior (unlike Poisson which flattens).
-float bloomHeight(float poissonD, float scaleR, float rimW, float rimStr, float bodyExp) {
-  float ed = sqrt(max(poissonD, 0.0));
-
-  // Rim: raised ridge near edge
-  // Outer slope (0 → peak): outward-facing normals
-  // Inner slope (peak → 0): inward transition to body
-  float rimRise = smoothstep(0.0, rimW * 0.5, ed);
-  float rimFall = 1.0 - smoothstep(rimW * 0.5, rimW * 1.5, ed);
-  float rim = rimRise * rimFall;
-
-  // Body: dome from scale ratio (peaks at center of shape)
-  // scaleR: 0 at center, 1 at outer boundary → invert for dome
+// Body dome height from scaleRatio (G channel), masked by Poisson (R channel).
+// Smooth, slowly-varying field — computed at coarse scale for noise-free normals.
+// The poissonR mask prevents a false rim at the shape boundary: outside the shape
+// G=0 which would give max dome height; the R=0 mask forces it to zero instead.
+float bodyDome(float scaleR, float poissonR, float bodyExp) {
   float bodyD = 1.0 - clamp(scaleR, 0.0, 1.0);
-  float body = pow(max(bodyD, 0.001), bodyExp);
+  float dome = pow(max(bodyD, 0.001), bodyExp);
+  float mask = smoothstep(0.0, 0.05, poissonR);
+  return dome * mask;
+}
 
-  return rim * rimStr + body;
+// Rim edge height from Poisson distance (R channel).
+// Sharp feature near shape boundary — computed at fine scale for crisp normals.
+// Raised ridge: outer slope faces outward (catches highlights),
+// inner slope faces inward (convex-to-concave transition).
+float rimEdge(float poissonD, float rimW, float rimStr) {
+  float ed = sqrt(max(poissonD, 0.0));
+  float rimRise = smoothstep(0.0, rimW * 0.7, ed);
+  float rimFall = 1.0 - smoothstep(rimW * 0.7, rimW * 2.0, ed);
+  return rimRise * rimFall * rimStr;
 }
 
 void main() {
@@ -287,34 +285,54 @@ void main() {
   float opacity = gradient.a * outerShape;
 
   // --- 3D Highlight from shaped height profile ---
-  // Uses Poisson (R) for rim normals, scaleRatio (G) for body dome normals.
-  // Direct height sampling at neighbors (not chain rule) preserves interior curvature.
+  // Split-scale normal computation: body and rim use independent kernels
+  // optimized for their spatial frequency. Body dome is smooth (coarse scale
+  // with high mipmap LOD eliminates 8-bit quantization). Rim is sharp
+  // (fine scale at LOD 0 preserves thin edge detail).
   if (u_highlightIntensity > 0.0 || u_debugNormals > 0.5) {
-    // Height profile parameters
     float rimW = mix(0.1, 0.5, u_highlightRimWidth);
     float rimStr = mix(0.5, 3.0, u_highlightRimStrength);
     float bodyExp = mix(0.3, 1.5, u_highlightBodyCurve);
 
-    // Sample texture (R=Poisson, G=scaleRatio) at 4 neighbors
     vec2 texel = 1.0 / vec2(textureSize(u_image, 0));
-    float sampleRadius = mix(1.0, 6.0, u_highlightSharpness);
-    vec2 off = texel * sampleRadius;
 
-    vec4 tL = texture(u_image, imgUV + vec2(-off.x, 0.0));
-    vec4 tR = texture(u_image, imgUV + vec2( off.x, 0.0));
-    vec4 tD = texture(u_image, imgUV + vec2(0.0, -off.y));
-    vec4 tU = texture(u_image, imgUV + vec2(0.0,  off.y));
+    // --- Body dome: coarse scale for smooth interior normals ---
+    // Uses scaleRatio (G channel) masked by Poisson (R channel).
+    // LOD 2.5 + radius 16 = each sample pre-averages ~36 source texels
+    // over a 32-texel span, eliminating 8-bit quantization artifacts.
+    // The R channel mask prevents the boundary discontinuity (G=0 outside
+    // shape would read as max dome height without it).
+    vec2 offC = texel * 16.0;
+    vec4 sL = textureLod(u_image, imgUV + vec2(-offC.x, 0.0), 2.5);
+    vec4 sR = textureLod(u_image, imgUV + vec2( offC.x, 0.0), 2.5);
+    vec4 sU = textureLod(u_image, imgUV + vec2(0.0, -offC.y), 2.5);
+    vec4 sD = textureLod(u_image, imgUV + vec2(0.0,  offC.y), 2.5);
+    float bL = bodyDome(sL.g, sL.r, bodyExp);
+    float bR = bodyDome(sR.g, sR.r, bodyExp);
+    float bU = bodyDome(sU.g, sU.r, bodyExp);
+    float bD = bodyDome(sD.g, sD.r, bodyExp);
 
-    // Evaluate height at all 4 sample points using both fields
-    float hL = bloomHeight(tL.r, tL.g, rimW, rimStr, bodyExp);
-    float hR = bloomHeight(tR.r, tR.g, rimW, rimStr, bodyExp);
-    float hD = bloomHeight(tD.r, tD.g, rimW, rimStr, bodyExp);
-    float hU = bloomHeight(tU.r, tU.g, rimW, rimStr, bodyExp);
+    float bodyGradX = (bR - bL) / 32.0;
+    float bodyGradY = (bD - bU) / 32.0;
 
-    // Normals from finite height differences
-    float heightScale = mix(5.0, 50.0, u_highlightSharpness);
-    float dhdx = (hR - hL) * 0.5 * heightScale;
-    float dhdy = (hU - hD) * 0.5 * heightScale;
+    // --- Rim edge: fine scale for sharp edge normals ---
+    // Uses Poisson distance (R channel). LOD 0 at small radius preserves
+    // the thin rim ridge (5-10 texels wide). Poisson has strong gradients
+    // near edges so quantization noise is negligible here.
+    float rimRadius = mix(2.0, 5.0, u_highlightSharpness);
+    vec2 offR = texel * rimRadius;
+    float rL = rimEdge(textureLod(u_image, imgUV + vec2(-offR.x, 0.0), 0.0).r, rimW, rimStr);
+    float rR = rimEdge(textureLod(u_image, imgUV + vec2( offR.x, 0.0), 0.0).r, rimW, rimStr);
+    float rU = rimEdge(textureLod(u_image, imgUV + vec2(0.0, -offR.y), 0.0).r, rimW, rimStr);
+    float rD = rimEdge(textureLod(u_image, imgUV + vec2(0.0,  offR.y), 0.0).r, rimW, rimStr);
+
+    float rimGradX = (rR - rL) / (2.0 * rimRadius);
+    float rimGradY = (rD - rU) / (2.0 * rimRadius);
+
+    // Combine body and rim gradients, convert to visual normal tilt
+    float heightScale = mix(30.0, 120.0, u_highlightSharpness);
+    float dhdx = (bodyGradX + rimGradX) * heightScale;
+    float dhdy = (bodyGradY + rimGradY) * heightScale;
 
     vec3 normal = normalize(vec3(-dhdx, -dhdy, 0.25));
 
@@ -575,8 +593,10 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
             tempImg.data[px + 3] = 255;
           } else {
             const poissonRatio = maxVal > 0 ? u[idx]! / maxVal : 0;
-            const dist = Math.round(255 * poissonRatio);
-            tempImg.data[px] = dist; // R: Poisson distance (0=edge, 255=deep interior)
+            // Dither: ±0.5 LSB random noise before quantizing to 8-bit.
+            // Breaks up flat quantization bands so the Sobel kernel in the shader
+            // sees smooth gradients instead of staircase plateaus.
+            tempImg.data[px] = Math.round(255 * poissonRatio + (Math.random() - 0.5)); // R: Poisson distance
 
             // G: scale ratio (0=center, 1=outer boundary) — petal-shaped contours
             const dx = x - cx;
@@ -588,7 +608,7 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
             const frac = angleDeg - Math.floor(angleDeg);
             const rMax = rOuterSmooth[binLow]! * (1 - frac) + rOuterSmooth[binHigh]! * frac;
             const scaleRatio = rMax > 0 ? Math.min(pixDist / rMax, 1.0) : 0;
-            tempImg.data[px + 1] = Math.round(255 * scaleRatio);
+            tempImg.data[px + 1] = Math.round(255 * scaleRatio + (Math.random() - 0.5));
 
             tempImg.data[px + 2] = 0; // placeholder, blur added later
             tempImg.data[px + 3] = 255;
