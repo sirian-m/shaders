@@ -71,6 +71,14 @@ uniform float u_innerGlow;
 uniform float u_outerGlow;
 uniform float u_petalEmphasis;
 uniform float u_waveCurvature;
+uniform float u_waveClarity;
+uniform float u_highlightIntensity;
+uniform float u_highlightAngle;
+uniform float u_highlightSharpness;
+uniform float u_highlightRimWidth;
+uniform float u_highlightRimStrength;
+uniform float u_highlightBodyCurve;
+uniform float u_debugNormals;
 
 ${ declarePI }
 ${ simplexNoise }
@@ -103,6 +111,30 @@ float blurEdge3x3(sampler2D tex, vec2 uv, vec2 dudx, vec2 dudy, float radius, fl
   sum += w1 * textureGrad(tex, uv + vec2(r.x, r.y), dudx, dudy).b;
 
   return sum / norm;
+}
+
+// Height profile for 3D highlight normals.
+// Uses two fields: Poisson (R) for rim, scaleRatio (G) for body dome.
+// Rim: raised ridge near the edge — outer slope faces outward (catches highlights),
+//   inner slope faces inward (convex-to-concave S-curve transition).
+// Body: power-curve dome from scaleRatio, which follows petal contours
+//   and has gradients everywhere in the interior (unlike Poisson which flattens).
+float bloomHeight(float poissonD, float scaleR, float rimW, float rimStr, float bodyExp) {
+  float ed = sqrt(max(poissonD, 0.0));
+
+  // Rim: raised ridge near edge
+  // Outer slope (0 → peak): outward-facing normals
+  // Inner slope (peak → 0): inward transition to body
+  float rimRise = smoothstep(0.0, rimW * 0.5, ed);
+  float rimFall = 1.0 - smoothstep(rimW * 0.5, rimW * 1.5, ed);
+  float rim = rimRise * rimFall;
+
+  // Body: dome from scale ratio (peaks at center of shape)
+  // scaleR: 0 at center, 1 at outer boundary → invert for dome
+  float bodyD = 1.0 - clamp(scaleR, 0.0, 1.0);
+  float body = pow(max(bodyD, 0.001), bodyExp);
+
+  return rim * rimStr + body;
 }
 
 void main() {
@@ -173,13 +205,17 @@ void main() {
   float age1 = mod(wavePos1 - waveCoord, 1.0);
   float age2 = mod(wavePos2 - waveCoord, 1.0);
 
+  // Wave clarity ramp: waves start blurry near center, sharpen toward outer edge
+  float clarityFactor = mix(1.0, pow(waveCoord, mix(1.0, 3.0, u_waveClarity)), u_waveClarity);
+
   // Trailing decay: exponential brightness falloff after wavefront passes
-  float decayRate = mix(6.0, 2.0, u_bloomSpread);
+  float decayRate = mix(6.0, 2.0, u_bloomSpread) * max(clarityFactor, 0.1);
   float trail1 = exp(-age1 * decayRate);
   float trail2 = exp(-age2 * decayRate);
 
   // Soft leading edge: gradual ramp-up ahead of the wavefront
-  float leadWidth = mix(0.05, 0.2, u_softness);
+  float baseLeadWidth = mix(0.05, 0.2, u_softness);
+  float leadWidth = baseLeadWidth / max(clarityFactor, 0.1);
   float ahead1 = 1.0 - age1;
   float ahead2 = 1.0 - age2;
   float lead1 = exp(-ahead1 * ahead1 / (2.0 * leadWidth * leadWidth));
@@ -249,6 +285,58 @@ void main() {
   // --- Final color ---
   vec3 color = gradient.rgb * outerShape;
   float opacity = gradient.a * outerShape;
+
+  // --- 3D Highlight from shaped height profile ---
+  // Uses Poisson (R) for rim normals, scaleRatio (G) for body dome normals.
+  // Direct height sampling at neighbors (not chain rule) preserves interior curvature.
+  if (u_highlightIntensity > 0.0 || u_debugNormals > 0.5) {
+    // Height profile parameters
+    float rimW = mix(0.1, 0.5, u_highlightRimWidth);
+    float rimStr = mix(0.5, 3.0, u_highlightRimStrength);
+    float bodyExp = mix(0.3, 1.5, u_highlightBodyCurve);
+
+    // Sample texture (R=Poisson, G=scaleRatio) at 4 neighbors
+    vec2 texel = 1.0 / vec2(textureSize(u_image, 0));
+    float sampleRadius = mix(1.0, 6.0, u_highlightSharpness);
+    vec2 off = texel * sampleRadius;
+
+    vec4 tL = texture(u_image, imgUV + vec2(-off.x, 0.0));
+    vec4 tR = texture(u_image, imgUV + vec2( off.x, 0.0));
+    vec4 tD = texture(u_image, imgUV + vec2(0.0, -off.y));
+    vec4 tU = texture(u_image, imgUV + vec2(0.0,  off.y));
+
+    // Evaluate height at all 4 sample points using both fields
+    float hL = bloomHeight(tL.r, tL.g, rimW, rimStr, bodyExp);
+    float hR = bloomHeight(tR.r, tR.g, rimW, rimStr, bodyExp);
+    float hD = bloomHeight(tD.r, tD.g, rimW, rimStr, bodyExp);
+    float hU = bloomHeight(tU.r, tU.g, rimW, rimStr, bodyExp);
+
+    // Normals from finite height differences
+    float heightScale = mix(5.0, 50.0, u_highlightSharpness);
+    float dhdx = (hR - hL) * 0.5 * heightScale;
+    float dhdy = (hU - hD) * 0.5 * heightScale;
+
+    vec3 normal = normalize(vec3(-dhdx, -dhdy, 0.25));
+
+    // Debug: visualize normal map
+    if (u_debugNormals > 0.5) {
+      vec3 normalVis = normal * 0.5 + 0.5;
+      fragColor = vec4(normalVis * isShape, isShape);
+      return;
+    }
+
+    // Light direction from angle (0-1 maps to 0-2pi)
+    float hlAngle = u_highlightAngle * TWO_PI;
+    vec3 lightDir = normalize(vec3(cos(hlAngle), sin(hlAngle), 0.7));
+
+    // Specular highlight (Blinn-Phong style)
+    float NdotL = max(dot(normal, lightDir), 0.0);
+    float specular = pow(NdotL, 4.0);
+    float highlight = specular * u_highlightIntensity;
+
+    // Brighten toward white at highlight spots
+    color = mix(color, vec3(opacity), highlight * isShape);
+  }
 
   // --- Composite over background ---
   vec3 bgColor = u_colorBack.rgb * u_colorBack.a;
@@ -739,6 +827,14 @@ export interface BloomUniforms extends ShaderSizingUniforms {
   u_outerGlow: number;
   u_petalEmphasis: number;
   u_waveCurvature: number;
+  u_waveClarity: number;
+  u_highlightIntensity: number;
+  u_highlightAngle: number;
+  u_highlightSharpness: number;
+  u_highlightRimWidth: number;
+  u_highlightRimStrength: number;
+  u_highlightBodyCurve: number;
+  u_debugNormals: number;
 }
 
 export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
@@ -753,4 +849,12 @@ export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
   outerGlow?: number;
   petalEmphasis?: number;
   waveCurvature?: number;
+  waveClarity?: number;
+  highlightIntensity?: number;
+  highlightAngle?: number;
+  highlightSharpness?: number;
+  highlightRimWidth?: number;
+  highlightRimStrength?: number;
+  highlightBodyCurve?: number;
+  debugNormals?: boolean;
 }
