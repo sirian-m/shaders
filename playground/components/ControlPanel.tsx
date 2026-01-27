@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useCallback } from 'react';
 import type { ShaderEntry, ParamConfig } from '@/lib/shader-registry';
 import { SliderControl } from './controls/SliderControl';
 import { ColorControl } from './controls/ColorControl';
@@ -86,9 +87,19 @@ export function ControlPanel({
   onPresetSelect,
   activePresetIndex,
 }: ControlPanelProps) {
+  const [copied, setCopied] = useState(false);
+
   const handleChange = (key: string, value: any) => {
     onChange({ [key]: value });
   };
+
+  const handleCopySettings = useCallback(() => {
+    const json = JSON.stringify(params, null, 2);
+    navigator.clipboard.writeText(json).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [params]);
 
   // Split params into shader-specific and sizing
   const sizingKeys = new Set(['fit', 'scale', 'rotation', 'offsetX', 'offsetY']);
@@ -99,7 +110,15 @@ export function ControlPanel({
     <div className="w-[280px] shrink-0 bg-[var(--bg-panel)] border-l border-[var(--border)] flex flex-col h-full overflow-y-auto">
       {/* Header */}
       <div className="px-3 pt-3 pb-2 border-b border-[var(--border)]">
-        <div className="text-[12px] font-medium text-[var(--text-primary)]">{shaderEntry.name}</div>
+        <div className="flex items-center justify-between">
+          <div className="text-[12px] font-medium text-[var(--text-primary)]">{shaderEntry.name}</div>
+          <button
+            onClick={handleCopySettings}
+            className="px-2 py-0.5 rounded text-[10px] border transition-colors bg-[var(--bg-canvas)] text-[var(--text-secondary)] border-[var(--control-border)] hover:border-[var(--text-secondary)]"
+          >
+            {copied ? 'Copied!' : 'Copy JSON'}
+          </button>
+        </div>
 
         {/* Presets */}
         {shaderEntry.presets.length > 0 && (
