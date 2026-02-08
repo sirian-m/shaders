@@ -51,6 +51,8 @@ import {
   imageDitheringPresets,
   Heatmap,
   heatmapPresets,
+  Bloom,
+  bloomPresets,
   LiquidMetal,
   liquidMetalPresets,
   HalftoneDots,
@@ -67,6 +69,8 @@ interface BaseParam {
   key: string;
   label: string;
   type: ParamType;
+  /** Only show this control when the param with the given key has the specified value. */
+  visibleWhen?: { key: string; is: any };
 }
 
 export interface NumberParam extends BaseParam {
@@ -624,6 +628,37 @@ export const shaderRegistry: ShaderEntry[] = [
       { key: 'noise', label: 'Noise', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'innerGlow', label: 'Inner Glow', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'outerGlow', label: 'Outer Glow', type: 'number', min: 0, max: 1, step: 0.01 },
+      ...sizingParams,
+    ],
+  },
+  {
+    name: 'Bloom',
+    slug: 'bloom',
+    Component: Bloom,
+    presets: bloomPresets,
+    requiresImage: true,
+    params: [
+      speed(),
+      { key: 'colorBack', label: 'Background', type: 'color' },
+      { key: 'colors', label: 'Colors', type: 'colorArray', maxColors: 10 },
+      { key: 'bloomSpread', label: 'Bloom Spread', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'petalEmphasis', label: 'Petal Emphasis', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'waveCurvature', label: 'Wave Curvature', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'waveClarity', label: 'Wave Clarity', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'contour', label: 'Contour', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'noise', label: 'Noise', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'softness', label: 'Softness', type: 'number', min: 0, max: 3, step: 0.01 },
+      { key: 'innerGlow', label: 'Inner Glow', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'outerGlow', label: 'Outer Glow', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'highlightIntensity', label: 'Highlight', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'highlightAngle', label: 'Highlight Angle', type: 'number', min: 0, max: 1, step: 0.01, visibleWhen: { key: 'highlightAngleAnim', is: false } },
+      { key: 'highlightAngleAnim', label: 'Animate Angle', type: 'boolean' },
+      { key: 'highlightAngleSpeed', label: 'Angle Speed', type: 'number', min: 0.1, max: 3, step: 0.01, visibleWhen: { key: 'highlightAngleAnim', is: true } },
+      { key: 'highlightSharpness', label: 'Highlight Sharpness', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'highlightRimWidth', label: 'Rim Width', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'highlightRimStrength', label: 'Rim Strength', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'highlightBodyCurve', label: 'Body Curve', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'debugNormals', label: 'Debug Normals', type: 'boolean' },
       ...sizingParams,
     ],
   },

@@ -8,19 +8,18 @@ export const bloomMeta = {
 } as const;
 
 /**
- * A blooming radial animation combining multi-color gradient glow with metallic
- * surface effects, applied to an input image. The animation emanates from the
+ * A blooming radial animation combining multi-color gradient glow,
+ * applied to an input image. The animation emanates from the
  * center of the shape outward, following petal contours of the input image.
  *
  * Fragment shader uniforms:
  * - u_time (float): Animation time
- * - u_image (sampler2D): Pre-processed source image texture (R = poisson distance, G = alpha, B = blur)
+ * - u_image (sampler2D): Pre-processed source image texture (R = poisson distance, G = scale ratio for wave shape, B = blur)
  * - u_imageAspectRatio (float): Aspect ratio of the source image
  * - u_colorBack (vec4): Background color in RGBA
  * - u_colors (vec4[]): Up to 10 bloom colors in RGBA
  * - u_colorsCount (float): Number of active colors
  * - u_bloomSpread (float): Width of the bloom wavefront (0 to 1)
- * - u_metallic (float): Blend between color glow and metallic surface (0 to 1)
  * - u_contour (float): Edge emphasis strength (0 to 1)
  * - u_noise (float): Organic noise intensity (0 to 1)
  * - u_softness (float): Color transition sharpness (0 to 1)
@@ -65,13 +64,22 @@ uniform vec4 u_colors[${ bloomMeta.maxColorCount }];
 uniform float u_colorsCount;
 
 uniform float u_bloomSpread;
-uniform float u_metallic;
 uniform float u_contour;
 uniform float u_noise;
 uniform float u_softness;
 uniform float u_innerGlow;
 uniform float u_outerGlow;
 uniform float u_petalEmphasis;
+uniform float u_waveCurvature;
+uniform float u_waveClarity;
+uniform float u_highlightIntensity;
+uniform float u_highlightAngle;
+uniform float u_highlightAngleSpeed;
+uniform float u_highlightSharpness;
+uniform float u_highlightRimWidth;
+uniform float u_highlightRimStrength;
+uniform float u_highlightBodyCurve;
+uniform float u_debugNormals;
 
 ${ declarePI }
 ${ simplexNoise }
@@ -106,11 +114,26 @@ float blurEdge3x3(sampler2D tex, vec2 uv, vec2 dudx, vec2 dudy, float radius, fl
   return sum / norm;
 }
 
-float bloomWave(float animCoord, float wavePos, float spread) {
-  // Create a smooth band centered at wavePos
-  float lower = smoothstep(wavePos - spread, wavePos - spread * .3, animCoord);
-  float upper = 1. - smoothstep(wavePos + spread * .3, wavePos + spread, animCoord);
-  return lower * upper;
+// Body dome height from scaleRatio (G channel), masked by Poisson (R channel).
+// Smooth, slowly-varying field — computed at coarse scale for noise-free normals.
+// The poissonR mask prevents a false rim at the shape boundary: outside the shape
+// G=0 which would give max dome height; the R=0 mask forces it to zero instead.
+float bodyDome(float scaleR, float poissonR, float bodyExp) {
+  float bodyD = 1.0 - clamp(scaleR, 0.0, 1.0);
+  float dome = pow(max(bodyD, 0.001), bodyExp);
+  float mask = smoothstep(0.0, 0.05, poissonR);
+  return dome * mask;
+}
+
+// Rim edge height from Poisson distance (R channel).
+// Sharp feature near shape boundary — computed at fine scale for crisp normals.
+// Raised ridge: outer slope faces outward (catches highlights),
+// inner slope faces inward (convex-to-concave transition).
+float rimEdge(float poissonD, float rimW, float rimStr) {
+  float ed = sqrt(max(poissonD, 0.0));
+  float rimRise = smoothstep(0.0, rimW * 0.7, ed);
+  float rimFall = 1.0 - smoothstep(rimW * 0.7, rimW * 2.0, ed);
+  return rimRise * rimFall * rimStr;
 }
 
 void main() {
@@ -127,135 +150,212 @@ void main() {
   vec2 dudx = dFdx(imgUV);
   vec2 dudy = dFdy(imgUV);
 
-  if (img.a == 0.) {
+  float t = .1 * u_time;
+
+  // --- Extract texture channels ---
+  float poissonDist = img.r;
+  float scaleRatio = img.g; // Pre-computed: 0 at center, 1 at outer boundary (petal-shaped contours)
+  float blurData = img.b;
+  blurData = blurEdge3x3(u_image, imgUV, dudx, dudy, 8., blurData);
+
+  // Shape mask: derived from Poisson field (0 outside shape, 1 inside)
+  float isShape = smoothstep(0.0, 0.03, poissonDist);
+
+  // Early exit for pixels far from shape
+  if (isShape < 0.01 && blurData < 0.01) {
     fragColor = u_colorBack;
     return;
   }
 
-  float t = .1 * u_time;
+  // --- Shape value from Poisson distance ---
+  // poissonDist: 0 at edges, 1 at deep interior
+  // Apply falloff curve controlled by bloomSpread
+  float falloff = mix(0.4, 2.5, u_bloomSpread);
+  float baseShape = pow(poissonDist, falloff);
 
-  // --- Distance fields ---
-  // R channel: Poisson distance (0 at edges, 1 at deepest interior)
-  float poissonDist = img.r;
+  // Radial distance: 1 at center, 0 at edge
+  float radialFromCenter = 1. - clamp(length(imgUV - vec2(.5)) * 2., 0., 1.);
+  float radialShape = pow(radialFromCenter, falloff);
 
-  // G channel: original alpha / opacity
-  float shapeAlpha = img.g;
+  // petalEmphasis: 0=uniform radial, 1=follows petal contours
+  float shape = mix(radialShape, baseShape, u_petalEmphasis);
 
-  // B channel: blur data for glow
-  float blurData = img.b;
-  blurData = blurEdge3x3(u_image, imgUV, dudx, dudy, 8., blurData);
+  // --- Subtle edge darkening (contour) ---
+  float edgeDark = smoothstep(0.0, mix(0.3, 0.02, u_contour), poissonDist);
+  shape *= mix(1.0, edgeDark, isShape);
 
-  // Euclidean radial distance from center (0 at center, 1 at edge)
-  float radial = length(imgUV - vec2(.5)) * 2.;
-  radial = clamp(radial, 0., 1.);
+  // --- Inner glow: brightens interior ---
+  float innerBrightness = poissonDist * mix(0.0, 0.3, u_innerGlow);
+  shape = clamp(shape + innerBrightness * isShape, 0.0, 1.0);
 
-  // Radial from center: 1 at center, 0 at edge
-  float radialFromCenter = 1. - radial;
+  // --- Continuous outward wave from inner cutout ---
+  // distFromCenter: 0 at image center (inner cutout), 1 at image edge (outer petals)
+  float distFromCenter = 1.0 - radialFromCenter;
+  // waveCurvature: 0 = circular wavefronts (radial), 1 = petal-shaped wavefronts
+  // scaleRatio has iso-contours that are scaled versions of the outer boundary shape
+  float waveCoord = mix(distFromCenter, scaleRatio, u_waveCurvature);
 
-  // Blend contour-following distance with radial distance
-  // petalEmphasis=0: uniform radial, petalEmphasis=1: follows petal contours
-  float animCoord = mix(radialFromCenter, poissonDist, u_petalEmphasis);
+  // Two staggered wavefronts continuously traveling outward
+  float cycle = t * 0.3;
+  float wavePos1 = fract(cycle);
+  float wavePos2 = fract(cycle + 0.5);
 
-  // --- Bloom wave animation ---
-  // 3 overlapping waves at 1/3 period offset for continuous animation
-  float spread = mix(.08, .5, u_bloomSpread);
+  // How long ago each wavefront passed this pixel (mod wraps around seamlessly)
+  float age1 = mod(wavePos1 - waveCoord, 1.0);
+  float age2 = mod(wavePos2 - waveCoord, 1.0);
 
-  float wave1Pos = fract(t);
-  float wave2Pos = fract(t + .333);
-  float wave3Pos = fract(t + .667);
+  // Wave clarity ramp: waves start blurry near center, sharpen toward outer edge
+  float clarityFactor = mix(1.0, pow(waveCoord, mix(1.0, 3.0, u_waveClarity)), u_waveClarity);
 
-  // Waves sweep from high animCoord (center/interior) to low (edges)
-  // Invert wave position so wave starts from center
-  float w1 = bloomWave(animCoord, 1. - wave1Pos, spread);
-  float w2 = bloomWave(animCoord, 1. - wave2Pos, spread);
-  float w3 = bloomWave(animCoord, 1. - wave3Pos, spread);
+  // Trailing decay: exponential brightness falloff after wavefront passes
+  float decayRate = mix(6.0, 2.0, u_bloomSpread) * max(clarityFactor, 0.1);
+  float trail1 = exp(-age1 * decayRate);
+  float trail2 = exp(-age2 * decayRate);
 
-  float waveIntensity = clamp(w1 + w2 + w3, 0., 1.);
+  // Soft leading edge: gradual ramp-up ahead of the wavefront
+  float baseLeadWidth = mix(0.05, 0.2, u_softness);
+  float leadWidth = baseLeadWidth / max(clarityFactor, 0.1);
+  float ahead1 = 1.0 - age1;
+  float ahead2 = 1.0 - age2;
+  float lead1 = exp(-ahead1 * ahead1 / (2.0 * leadWidth * leadWidth));
+  float lead2 = exp(-ahead2 * ahead2 / (2.0 * leadWidth * leadWidth));
+
+  // Each wave: trailing decay behind + soft leading glow ahead
+  float wave1 = max(trail1, lead1);
+  float wave2 = max(trail2, lead2);
+  float wave = max(wave1, wave2);
+
+  // Wave modulates shape — creates visible traveling color gradient
+  shape = shape * (0.3 + 0.7 * wave);
 
   // --- Organic noise distortion ---
   float noise = snoise(imgUV * 6. + t * .3);
-  waveIntensity += u_noise * .2 * noise * waveIntensity;
-  waveIntensity = clamp(waveIntensity, 0., 1.);
+  shape += u_noise * 0.1 * noise;
+  shape = clamp(shape, 0.0, 1.0);
 
-  // --- Glow effects ---
-  // Determine inside/outside shape
-  float isInside = 1. - smoothstep(.01, .05, poissonDist);
+  // Mask shape to actual shape region
+  shape *= isShape;
 
-  float outerBlur = 1. - mix(1., blurData, isInside);
+  // --- Outer glow (heatmap approach, kept as-is) ---
+  float outerBlur = 1.0 - mix(1.0, blurData, 1.0 - isShape);
   outerBlur *= imgSoftFrame;
-  float innerBlur = mix(blurData, 0., isInside);
+  float outerGlowBase = .9 * pow(max(outerBlur, 0.0), .8) * mix(0., 5., pow(u_outerGlow, 2.));
+  float glowPulse = .5 + .5 * sin(TWO_PI * t + outerBlur * 6.);
+  float outerGlowVal = outerGlowBase * (.4 + .6 * glowPulse);
 
-  float innerGlow = (1. - isInside) * innerBlur * mix(0., 2., u_innerGlow);
-  float outerGlow = isInside * outerBlur * mix(0., 5., pow(u_outerGlow, 2.));
-
-  // --- Edge contour ---
-  float edgeDist = poissonDist;
-  float edge = smoothstep(.0, .04, edgeDist) * (1. - smoothstep(.04, .12, edgeDist));
-  float contourBoost = u_contour * 2. * edge;
-
-  // --- Combine heat value ---
-  float heat = waveIntensity * (1. - isInside);
-  heat += innerGlow;
-  heat += outerGlow;
-  heat += contourBoost * (1. - isInside);
-  heat = clamp(heat, 0., 1.);
-
-  // --- Apply softness to heat distribution ---
-  heat = pow(heat, mix(1.5, .7, u_softness));
+  // Combine: shape fill inside + outer glow outside
+  float combinedShape = shape + outerGlowVal;
+  combinedShape = clamp(combinedShape, 0.0, 1.0);
 
   // Add grain noise
-  heat += (.005 + .35 * u_noise) * (fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453123) - .5);
-  heat = clamp(heat, 0., 1.);
+  combinedShape += (.005 + .35 * u_noise) * (fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453123) - .5);
+  combinedShape = clamp(combinedShape, 0.0, 1.0);
 
-  // --- Multi-color gradient mapping (identical to heatmap pattern) ---
-  float mixer = heat * u_colorsCount;
+  // --- Smooth multi-color gradient mapping (from static-radial-gradient) ---
+  float mixer = combinedShape * u_colorsCount;
   vec4 gradient = u_colors[0];
   gradient.rgb *= gradient.a;
   float outerShape = 0.;
+
   for (int i = 1; i < ${ bloomMeta.maxColorCount + 1 }; i++) {
     if (i > int(u_colorsCount)) break;
-    float m = clamp(mixer - float(i - 1), 0., 1.);
+
+    float mLinear = clamp(mixer - float(i - 1), 0.0, 1.0);
+    float aa = fwidth(mLinear);
+    float w = min(mix(0.1, 0.5, u_softness), 0.5);
+    float easeT = clamp((mLinear - (0.5 - w - aa)) / (2.0 * w + 2.0 * aa), 0.0, 1.0);
+    float p = mix(2.0, 1.0, clamp((mix(0.1, 0.5, u_softness) - 0.5) * 2.0, 0.0, 1.0));
+    float m = easeT < 0.5
+      ? 0.5 * pow(2.0 * easeT, p)
+      : 1.0 - 0.5 * pow(2.0 * (1.0 - easeT), p);
+
+    float quadBlend = clamp((mix(0.1, 0.5, u_softness) - 0.5) * 2.0, 0.0, 1.0);
+    m = mix(m, m * m, 0.5 * quadBlend);
+
     if (i == 1) {
       outerShape = m;
     }
+
     vec4 c = u_colors[i - 1];
     c.rgb *= c.a;
     gradient = mix(gradient, c, m);
   }
 
-  // --- Metallic layer ---
-  // Compute gradient direction from distance field for metallic reflections
-  float dDistDx = dFdx(poissonDist);
-  float dDistDy = dFdy(poissonDist);
-  float gradMag = length(vec2(dDistDx, dDistDy));
+  // --- Final color ---
+  vec3 color = gradient.rgb * outerShape;
+  float opacity = gradient.a * outerShape;
 
-  // Create reflective bands along isocontour lines
-  vec2 gradDir = normalize(vec2(dDistDx, dDistDy) + .001);
-  float stripe = dot(gradDir, imgUV * 8.) - t * .5;
-  stripe += u_noise * .5 * snoise(imgUV * 4. - t * .2);
+  // --- 3D Highlight from shaped height profile ---
+  // Split-scale normal computation: body and rim use independent kernels
+  // optimized for their spatial frequency. Body dome is smooth (coarse scale
+  // with high mipmap LOD eliminates 8-bit quantization). Rim is sharp
+  // (fine scale at LOD 0 preserves thin edge detail).
+  if (u_highlightIntensity > 0.0 || u_debugNormals > 0.5) {
+    float rimW = mix(0.1, 0.5, u_highlightRimWidth);
+    float rimStr = mix(0.5, 3.0, u_highlightRimStrength);
+    float bodyExp = mix(0.3, 1.5, u_highlightBodyCurve);
 
-  float metallicBand = .5 + .45 * sin(stripe * TWO_PI);
+    vec2 texel = 1.0 / vec2(textureSize(u_image, 0));
 
-  // Bump from distance field
-  float bump = pow(clamp(poissonDist, 0., 1.), .8);
-  metallicBand = mix(metallicBand, .8 + .2 * metallicBand, .3 * bump);
+    // --- Body dome: coarse scale for smooth interior normals ---
+    // Uses scaleRatio (G channel) masked by Poisson (R channel).
+    // LOD 2.5 + radius 16 = each sample pre-averages ~36 source texels
+    // over a 32-texel span, eliminating 8-bit quantization artifacts.
+    // The R channel mask prevents the boundary discontinuity (G=0 outside
+    // shape would read as max dome height without it).
+    vec2 offC = texel * 16.0;
+    vec4 sL = textureLod(u_image, imgUV + vec2(-offC.x, 0.0), 2.5);
+    vec4 sR = textureLod(u_image, imgUV + vec2( offC.x, 0.0), 2.5);
+    vec4 sU = textureLod(u_image, imgUV + vec2(0.0, -offC.y), 2.5);
+    vec4 sD = textureLod(u_image, imgUV + vec2(0.0,  offC.y), 2.5);
+    float bL = bodyDome(sL.g, sL.r, bodyExp);
+    float bR = bodyDome(sR.g, sR.r, bodyExp);
+    float bU = bodyDome(sU.g, sU.r, bodyExp);
+    float bD = bodyDome(sD.g, sD.r, bodyExp);
 
-  // Add specular highlight
-  float specular = pow(max(0., sin(stripe * TWO_PI * 2.)), 8.) * .3;
-  metallicBand += specular;
+    float bodyGradX = (bR - bL) / 32.0;
+    float bodyGradY = (bD - bU) / 32.0;
 
-  metallicBand = clamp(metallicBand, 0., 1.);
+    // --- Rim edge: fine scale for sharp edge normals ---
+    // Uses Poisson distance (R channel). LOD 0 at small radius preserves
+    // the thin rim ridge (5-10 texels wide). Poisson has strong gradients
+    // near edges so quantization noise is negligible here.
+    float rimRadius = mix(2.0, 5.0, u_highlightSharpness);
+    vec2 offR = texel * rimRadius;
+    float rL = rimEdge(textureLod(u_image, imgUV + vec2(-offR.x, 0.0), 0.0).r, rimW, rimStr);
+    float rR = rimEdge(textureLod(u_image, imgUV + vec2( offR.x, 0.0), 0.0).r, rimW, rimStr);
+    float rU = rimEdge(textureLod(u_image, imgUV + vec2(0.0, -offR.y), 0.0).r, rimW, rimStr);
+    float rD = rimEdge(textureLod(u_image, imgUV + vec2(0.0,  offR.y), 0.0).r, rimW, rimStr);
 
-  // --- Blend glow and metallic ---
-  vec3 glowColor = gradient.rgb * outerShape;
-  float glowOpacity = gradient.a * outerShape;
+    float rimGradX = (rR - rL) / (2.0 * rimRadius);
+    float rimGradY = (rD - rU) / (2.0 * rimRadius);
 
-  // Metallic modulates the gradient colors
-  vec3 metalColor = glowColor * metallicBand;
-  float metalOpacity = glowOpacity;
+    // Combine body and rim gradients, convert to visual normal tilt
+    float heightScale = mix(30.0, 120.0, u_highlightSharpness);
+    float dhdx = (bodyGradX + rimGradX) * heightScale;
+    float dhdy = (bodyGradY + rimGradY) * heightScale;
 
-  vec3 color = mix(glowColor, metalColor, u_metallic);
-  float opacity = mix(glowOpacity, metalOpacity, u_metallic);
+    vec3 normal = normalize(vec3(-dhdx, -dhdy, 0.25));
+
+    // Debug: visualize normal map
+    if (u_debugNormals > 0.5) {
+      vec3 normalVis = normal * 0.5 + 0.5;
+      fragColor = vec4(normalVis * isShape, isShape);
+      return;
+    }
+
+    // Light direction from angle (0-1 maps to 0-2pi), optionally animated
+    float hlAngle = u_highlightAngle * TWO_PI + u_time * u_highlightAngleSpeed;
+    vec3 lightDir = normalize(vec3(cos(hlAngle), sin(hlAngle), 0.7));
+
+    // Specular highlight (Blinn-Phong style)
+    float NdotL = max(dot(normal, lightDir), 0.0);
+    float specular = pow(NdotL, 4.0);
+    float highlight = specular * u_highlightIntensity;
+
+    // Brighten toward white at highlight spots
+    color = mix(color, vec3(opacity), highlight * isShape);
+  }
 
   // --- Composite over background ---
   vec3 bgColor = u_colorBack.rgb * u_colorBack.a;
@@ -445,6 +545,36 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
         if (u[idx]! > maxVal) maxVal = u[idx]!;
       }
 
+      // --- Compute outer boundary distance per angle for petal-shaped wave coordinate ---
+      const NUM_ANGLES = 360;
+      const cx = poissonWidth / 2;
+      const cy = poissonHeight / 2;
+      const rOuterRaw = new Float32Array(NUM_ANGLES);
+
+      for (let y = 0; y < poissonHeight; y++) {
+        for (let x = 0; x < poissonWidth; x++) {
+          if (!shapeMask[y * poissonWidth + x]) continue;
+          const dx = x - cx;
+          const dy = y - cy;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const angleDeg = ((Math.atan2(dy, dx) * 180 / Math.PI) + 360) % 360;
+          const bin = Math.floor(angleDeg) % NUM_ANGLES;
+          if (dist > rOuterRaw[bin]!) rOuterRaw[bin] = dist;
+        }
+      }
+
+      // Smooth the outer boundary to fill gaps and reduce noise
+      const rOuterSmooth = new Float32Array(NUM_ANGLES);
+      const SMOOTH_HALF = 3;
+      for (let i = 0; i < NUM_ANGLES; i++) {
+        let sum = 0, count = 0;
+        for (let j = -SMOOTH_HALF; j <= SMOOTH_HALF; j++) {
+          const idx = ((i + j) % NUM_ANGLES + NUM_ANGLES) % NUM_ANGLES;
+          if (rOuterRaw[idx]! > 0) { sum += rOuterRaw[idx]!; count++; }
+        }
+        rOuterSmooth[i] = count > 0 ? sum / count : 1;
+      }
+
       // Create Poisson distance at working resolution
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = poissonWidth;
@@ -464,9 +594,23 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
             tempImg.data[px + 3] = 255;
           } else {
             const poissonRatio = maxVal > 0 ? u[idx]! / maxVal : 0;
-            const dist = Math.round(255 * poissonRatio);
-            tempImg.data[px] = dist; // R: Poisson distance (0=edge, 255=deep interior)
-            tempImg.data[px + 1] = shapeData[idx * 4 + 3] ?? 0; // G: original alpha
+            // Dither: ±0.5 LSB random noise before quantizing to 8-bit.
+            // Breaks up flat quantization bands so the Sobel kernel in the shader
+            // sees smooth gradients instead of staircase plateaus.
+            tempImg.data[px] = Math.round(255 * poissonRatio + (Math.random() - 0.5)); // R: Poisson distance
+
+            // G: scale ratio (0=center, 1=outer boundary) — petal-shaped contours
+            const dx = x - cx;
+            const dy = y - cy;
+            const pixDist = Math.sqrt(dx * dx + dy * dy);
+            const angleDeg = ((Math.atan2(dy, dx) * 180 / Math.PI) + 360) % 360;
+            const binLow = Math.floor(angleDeg) % NUM_ANGLES;
+            const binHigh = (binLow + 1) % NUM_ANGLES;
+            const frac = angleDeg - Math.floor(angleDeg);
+            const rMax = rOuterSmooth[binLow]! * (1 - frac) + rOuterSmooth[binHigh]! * frac;
+            const scaleRatio = rMax > 0 ? Math.min(pixDist / rMax, 1.0) : 0;
+            tempImg.data[px + 1] = Math.round(255 * scaleRatio + (Math.random() - 0.5));
+
             tempImg.data[px + 2] = 0; // placeholder, blur added later
             tempImg.data[px + 3] = 255;
           }
@@ -492,14 +636,6 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
 
       const outputData = outputCtx.getImageData(0, 0, width, height);
 
-      // Re-read original at padded size for alpha
-      const alphaCanvas = document.createElement('canvas');
-      alphaCanvas.width = width;
-      alphaCanvas.height = height;
-      const alphaCtx = alphaCanvas.getContext('2d')!;
-      alphaCtx.drawImage(image, padding, padding, imgWidth, imgHeight);
-      const alphaData = alphaCtx.getImageData(0, 0, width, height);
-
       // --- Step 4: Combine channels ---
       const finalImageData = ctx.createImageData(width, height);
       const dst = finalImageData.data;
@@ -507,7 +643,7 @@ export function toProcessedBloom(file: File | string): Promise<{ blob: Blob }> {
       for (let i = 0; i < totalPixels; i++) {
         const px = i * 4;
         dst[px] = outputData.data[px] ?? 0;             // R: Poisson distance
-        dst[px + 1] = alphaData.data[px + 3] ?? 0;      // G: original alpha as opacity indicator
+        dst[px + 1] = outputData.data[px + 1] ?? 0;     // G: scale ratio (petal-shaped wave coordinate)
         dst[px + 2] = bigBlurGray[i] ?? 0;               // B: blur data for glow
         dst[px + 3] = 255;
       }
@@ -705,13 +841,22 @@ export interface BloomUniforms extends ShaderSizingUniforms {
   u_colors: vec4[];
   u_colorsCount: number;
   u_bloomSpread: number;
-  u_metallic: number;
   u_contour: number;
   u_noise: number;
   u_softness: number;
   u_innerGlow: number;
   u_outerGlow: number;
   u_petalEmphasis: number;
+  u_waveCurvature: number;
+  u_waveClarity: number;
+  u_highlightIntensity: number;
+  u_highlightAngle: number;
+  u_highlightAngleSpeed: number;
+  u_highlightSharpness: number;
+  u_highlightRimWidth: number;
+  u_highlightRimStrength: number;
+  u_highlightBodyCurve: number;
+  u_debugNormals: number;
 }
 
 export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
@@ -719,11 +864,21 @@ export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
   colorBack?: string;
   colors?: string[];
   bloomSpread?: number;
-  metallic?: number;
   contour?: number;
   noise?: number;
   softness?: number;
   innerGlow?: number;
   outerGlow?: number;
   petalEmphasis?: number;
+  waveCurvature?: number;
+  waveClarity?: number;
+  highlightIntensity?: number;
+  highlightAngle?: number;
+  highlightAngleAnim?: boolean;
+  highlightAngleSpeed?: number;
+  highlightSharpness?: number;
+  highlightRimWidth?: number;
+  highlightRimStrength?: number;
+  highlightBodyCurve?: number;
+  debugNormals?: boolean;
 }
