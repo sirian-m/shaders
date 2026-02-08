@@ -69,6 +69,8 @@ interface BaseParam {
   key: string;
   label: string;
   type: ParamType;
+  /** Only show this control when the param with the given key has the specified value. */
+  visibleWhen?: { key: string; is: any };
 }
 
 export interface NumberParam extends BaseParam {
@@ -649,7 +651,9 @@ export const shaderRegistry: ShaderEntry[] = [
       { key: 'innerGlow', label: 'Inner Glow', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'outerGlow', label: 'Outer Glow', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'highlightIntensity', label: 'Highlight', type: 'number', min: 0, max: 1, step: 0.01 },
-      { key: 'highlightAngle', label: 'Highlight Angle', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'highlightAngle', label: 'Highlight Angle', type: 'number', min: 0, max: 1, step: 0.01, visibleWhen: { key: 'highlightAngleAnim', is: false } },
+      { key: 'highlightAngleAnim', label: 'Animate Angle', type: 'boolean' },
+      { key: 'highlightAngleSpeed', label: 'Angle Speed', type: 'number', min: 0.1, max: 3, step: 0.01, visibleWhen: { key: 'highlightAngleAnim', is: true } },
       { key: 'highlightSharpness', label: 'Highlight Sharpness', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'highlightRimWidth', label: 'Rim Width', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'highlightRimStrength', label: 'Rim Strength', type: 'number', min: 0, max: 1, step: 0.01 },

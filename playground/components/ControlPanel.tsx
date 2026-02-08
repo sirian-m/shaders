@@ -152,7 +152,12 @@ export function ControlPanel({
 
       {/* Shader params */}
       <div className="px-3 py-2 flex-1">
-        {shaderParams.map((config) => renderControl(config, params[config.key], handleChange))}
+        {shaderParams
+          .filter((config) => {
+            if (!config.visibleWhen) return true;
+            return params[config.visibleWhen.key] === config.visibleWhen.is;
+          })
+          .map((config) => renderControl(config, params[config.key], handleChange))}
 
         {/* Sizing section (collapsible) */}
         {sizingParamConfigs.length > 0 && (

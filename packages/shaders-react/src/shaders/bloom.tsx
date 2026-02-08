@@ -42,6 +42,8 @@ export const defaultPreset: BloomPreset = {
     waveClarity: 0.5,
     highlightIntensity: 0,
     highlightAngle: 0.15,
+    highlightAngleAnim: false,
+    highlightAngleSpeed: 0.5,
     highlightSharpness: 0.5,
     highlightRimWidth: 0.3,
     highlightRimStrength: 0.5,
@@ -70,6 +72,8 @@ export const chromePreset: BloomPreset = {
     waveClarity: 0.5,
     highlightIntensity: 1,
     highlightAngle: 0.22,
+    highlightAngleAnim: false,
+    highlightAngleSpeed: 0.5,
     highlightSharpness: 0.58,
     highlightRimWidth: 0.69,
     highlightRimStrength: 0.98,
@@ -98,6 +102,8 @@ export const neonPreset: BloomPreset = {
     waveClarity: 0.5,
     highlightIntensity: 0,
     highlightAngle: 0.15,
+    highlightAngleAnim: false,
+    highlightAngleSpeed: 0.5,
     highlightSharpness: 0.5,
     highlightRimWidth: 0.3,
     highlightRimStrength: 0.5,
@@ -108,7 +114,37 @@ export const neonPreset: BloomPreset = {
   },
 } as const satisfies BloomPreset;
 
-export const bloomPresets: BloomPreset[] = [defaultPreset, chromePreset, neonPreset];
+export const blackPetalsPreset: BloomPreset = {
+  name: 'Black Petals',
+  params: {
+    ...defaultObjectSizing,
+    scale: 0.75,
+    speed: 5.9,
+    frame: 0,
+    bloomSpread: 0,
+    contour: 1,
+    noise: 0.17,
+    softness: 0.71,
+    innerGlow: 0.45,
+    outerGlow: 0.13,
+    petalEmphasis: 1,
+    waveCurvature: 1,
+    waveClarity: 0.96,
+    highlightIntensity: 1,
+    highlightAngle: 0.22,
+    highlightAngleAnim: false,
+    highlightAngleSpeed: 0.5,
+    highlightSharpness: 0.58,
+    highlightRimWidth: 0.69,
+    highlightRimStrength: 0.98,
+    highlightBodyCurve: 0,
+    debugNormals: false,
+    colorBack: '#1a1a1a',
+    colors: ['#d1d1d1', '#ffffff', '#000000'],
+  },
+} as const satisfies BloomPreset;
+
+export const bloomPresets: BloomPreset[] = [defaultPreset, chromePreset, neonPreset, blackPetalsPreset];
 
 export const Bloom: React.FC<BloomProps> = memo(function BloomImpl({
   // Own props
@@ -126,6 +162,8 @@ export const Bloom: React.FC<BloomProps> = memo(function BloomImpl({
   waveClarity = defaultPreset.params.waveClarity,
   highlightIntensity = defaultPreset.params.highlightIntensity,
   highlightAngle = defaultPreset.params.highlightAngle,
+  highlightAngleAnim = defaultPreset.params.highlightAngleAnim,
+  highlightAngleSpeed = defaultPreset.params.highlightAngleSpeed,
   highlightSharpness = defaultPreset.params.highlightSharpness,
   highlightRimWidth = defaultPreset.params.highlightRimWidth,
   highlightRimStrength = defaultPreset.params.highlightRimStrength,
@@ -203,6 +241,7 @@ export const Bloom: React.FC<BloomProps> = memo(function BloomImpl({
       u_waveClarity: waveClarity,
       u_highlightIntensity: highlightIntensity,
       u_highlightAngle: highlightAngle,
+      u_highlightAngleSpeed: highlightAngleAnim ? highlightAngleSpeed : 0,
       u_highlightSharpness: highlightSharpness,
       u_highlightRimWidth: highlightRimWidth,
       u_highlightRimStrength: highlightRimStrength,
@@ -237,6 +276,8 @@ export const Bloom: React.FC<BloomProps> = memo(function BloomImpl({
       waveClarity,
       highlightIntensity,
       highlightAngle,
+      highlightAngleAnim,
+      highlightAngleSpeed,
       highlightSharpness,
       highlightRimWidth,
       highlightRimStrength,

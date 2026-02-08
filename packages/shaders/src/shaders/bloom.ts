@@ -74,6 +74,7 @@ uniform float u_waveCurvature;
 uniform float u_waveClarity;
 uniform float u_highlightIntensity;
 uniform float u_highlightAngle;
+uniform float u_highlightAngleSpeed;
 uniform float u_highlightSharpness;
 uniform float u_highlightRimWidth;
 uniform float u_highlightRimStrength;
@@ -343,8 +344,8 @@ void main() {
       return;
     }
 
-    // Light direction from angle (0-1 maps to 0-2pi)
-    float hlAngle = u_highlightAngle * TWO_PI;
+    // Light direction from angle (0-1 maps to 0-2pi), optionally animated
+    float hlAngle = u_highlightAngle * TWO_PI + u_time * u_highlightAngleSpeed;
     vec3 lightDir = normalize(vec3(cos(hlAngle), sin(hlAngle), 0.7));
 
     // Specular highlight (Blinn-Phong style)
@@ -850,6 +851,7 @@ export interface BloomUniforms extends ShaderSizingUniforms {
   u_waveClarity: number;
   u_highlightIntensity: number;
   u_highlightAngle: number;
+  u_highlightAngleSpeed: number;
   u_highlightSharpness: number;
   u_highlightRimWidth: number;
   u_highlightRimStrength: number;
@@ -872,6 +874,8 @@ export interface BloomParams extends ShaderSizingParams, ShaderMotionParams {
   waveClarity?: number;
   highlightIntensity?: number;
   highlightAngle?: number;
+  highlightAngleAnim?: boolean;
+  highlightAngleSpeed?: number;
   highlightSharpness?: number;
   highlightRimWidth?: number;
   highlightRimStrength?: number;
